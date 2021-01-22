@@ -197,6 +197,7 @@ struct gtp5g_net {
     struct list_head gtp5g_dev_list;
 };
 
+static struct gtp5g_qer *gtp5g_find_qer(struct net *net, struct nlattr *nla[]);
 static struct gtp5g_qer *qer_find_by_id(struct gtp5g_dev *gtp, u32 id);
 static void qer_context_delete(struct gtp5g_qer *qer);
 
@@ -1047,6 +1048,7 @@ static int gtp5g_handle_skb_ipv4(struct sk_buff *skb, struct net_device *dev,
     struct gtp5g_dev *gtp = netdev_priv(dev);
     struct gtp5g_pdr *pdr;
     struct gtp5g_far *far;
+    struct gtp5g_qer *qer;
     struct iphdr *iph;
 
     /* Read the IP destination address and resolve the PDR.
@@ -1065,6 +1067,17 @@ static int gtp5g_handle_skb_ipv4(struct sk_buff *skb, struct net_device *dev,
     }
     netdev_dbg(dev, "found PDR %p\n", pdr);
 
+	/* TODO: QoS rule have to apply before apply FAR 
+	 * */
+	qer = pdr->qer;
+	if (qer) {
+		printk("%s:%d QER Rule found, id(%#x) qfi(%#x)\n", 
+				__func__, __LINE__, qer->id, qer->qfi);
+	} else {
+		printk("%s:%d No QER Rule found\n", 
+				__func__, __LINE__);
+	}
+	
     far = pdr->far;
     if (far) {
         // One and only one of the DROP, FORW and BUFF flags shall be set to 1.
@@ -1101,6 +1114,9 @@ static void gtp5g_xmit_skb_ipv4(struct sk_buff *skb, struct gtp5g_pktinfo *pktin
     }
 }
 
+/**
+ * Entry function for Downlink packets
+ * */
 static netdev_tx_t gtp5g_dev_xmit(struct sk_buff *skb, struct net_device *dev)
 {
     unsigned int proto = ntohs(skb->protocol);
@@ -1366,11 +1382,16 @@ static void gtp5g_link_setup(struct net_device *dev)
     dev->features |= NETIF_F_LLTX;
     netif_keep_dst(dev);
 
-    /* Assume largest header, ie. GTPv1. */
+    /** TODO: Modify the headroom size based on
+	 * what are the extension header going to supports.
+	 * 
+	 */
     dev->needed_headroom = LL_MAX_HEADER +
     			sizeof(struct iphdr) +
                   	sizeof(struct udphdr) +
-                  	sizeof(struct gtpv1_hdr);
+                  	sizeof(struct gtpv1_hdr) + 
+					sizeof(struct gtp1_hdr_opt) +
+					sizeof(struct gtp1_hdr_ext_pdu_sess_ctr);
 }
 
 static int gtp5g_validate(struct nlattr *tb[], struct nlattr *data[],
@@ -1617,11 +1638,19 @@ static int gtp5g_rx(struct gtp5g_pdr *pdr, struct sk_buff *skb,
 {
     int rt;
     struct gtp5g_far *far = pdr->far;
+    struct gtp5g_qer *qer = pdr->qer;
 
     if (!far) {
         pr_err("There is no FAR related to PDR[%u]", pdr->id);
         return -1;
     }
+
+	if (qer) {
+		printk("%s:%d QER Rule found, id(%#x) qfi(%#x)\n", __func__, __LINE__,
+			qer->id, qer->qfi);
+	} else {
+		printk("There is no QER found\n");
+	}
 
     // TODO: not reading the value of outer_header_removal now,
     // just check if it is assigned.
@@ -1781,7 +1810,10 @@ static int gtp1u_udp_encap_recv(struct gtp5g_dev *gtp, struct sk_buff *skb)
     return gtp5g_rx(pdr, skb, hdrlen, gtp->role);
 }
 
-/* UDP encapsulation receive handler. See net/ipv4/udp.c.
+/**
+ * Entry function for Uplink packets
+ *
+ * UDP encapsulation receive handler. See net/ipv4/udp.c.
  * Return codes: 0: success, <0: error, >0: pass up to userspace UDP socket.
  */
 static int gtp5g_encap_recv(struct sock *sk, struct sk_buff *skb)
@@ -1795,7 +1827,7 @@ static int gtp5g_encap_recv(struct sock *sk, struct sk_buff *skb)
 
     switch (udp_sk(sk)->encap_type) {
     case UDP_ENCAP_GTP1U:
-        netdev_dbg(gtp->dev, "Receive GTP-U v1 packeti\n");
+        //netdev_dbg(gtp->dev, "Receive GTP-U v1 packet\n");
         ret = gtp1u_udp_encap_recv(gtp, skb);
         break;
     default:
