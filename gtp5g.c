@@ -593,14 +593,21 @@ static int pdr_fill(struct gtp5g_pdr *pdr, struct gtp5g_dev *gtp, struct genl_in
         }
 
         *pdr->qer_id = nla_get_u32(info->attrs[GTP5G_PDR_QER_ID]);
+		printk("%s:%d QER ID(%#x)\n", __func__, __LINE__, *pdr->qer_id);
 
         if (!hlist_unhashed(&pdr->hlist_related_qer))
             hlist_del_rcu(&pdr->hlist_related_qer);
+
         hlist_add_head_rcu(&pdr->hlist_related_qer, 
 							&gtp->related_qer_hash[u32_hashfn(*pdr->qer_id) % gtp->hash_size]);
 
         pdr->qer = qer_find_by_id(gtp, *pdr->qer_id);
-    }
+		if (!pdr->qer)
+			printk("%s:%d Failed to find QER id(%#x)\n", __func__, __LINE__,
+					*pdr->qer_id);
+    } else {
+		printk("%s:%d QER ID not exist)\n", __func__, __LINE__);
+	}
 
 
     if (unix_sock_client_update(pdr) < 0)
@@ -2122,6 +2129,11 @@ static int gtp5g_genl_fill_pdr(struct sk_buff *skb, u32 snd_portid, u32 snd_seq,
             goto GENLMSG_FAIL;
     }
 
+    if (pdr->qer_id) {
+        if (nla_put_u32(skb, GTP5G_PDR_QER_ID, *pdr->qer_id))
+            goto GENLMSG_FAIL;
+    }
+
     if (pdr->role_addr_ipv4.s_addr) {
         if (nla_put_u32(skb, GTP5G_PDR_ROLE_ADDR_IPV4, pdr->role_addr_ipv4.s_addr))
             goto GENLMSG_FAIL;
@@ -2733,12 +2745,11 @@ static int gtp5g_add_qer(struct gtp5g_dev *gtp, struct genl_info *info)
 		return -EEXIST;
 
     qer_id = nla_get_u32(info->attrs[GTP5G_QER_ID]);
-	//netdev_dbg(dev, "Adding QER_ID(%#x)", qer_id);
-	printk("Adding QER_ID(%#x)\n", qer_id);
+	printk("Adding QER_ID(%u)\n", qer_id);
 
     qer = qer_find_by_id(gtp, qer_id);
     if (qer) {
-		netdev_dbg(dev, "Given QER_ID(%#x) is exist", qer_id);
+		netdev_dbg(dev, "Given QER_ID(%u) is exist", qer_id);
 
     	if (info->nlhdr->nlmsg_flags & NLM_F_EXCL)
             return -EEXIST;
@@ -2748,23 +2759,27 @@ static int gtp5g_add_qer(struct gtp5g_dev *gtp, struct genl_info *info)
         err = qer_fill(qer, gtp, info);
         if (err < 0) {
             qer_context_delete(qer);
-            pr_warn("5G GTP update QER_ID(%#x) err(%#x)\n", qer_id, err);
+            pr_warn("5G GTP update QER_ID(%u) err(%u)\n", qer_id, err);
         } else {
-            netdev_dbg(dev, "5G GTP update QER_ID(%#x)", qer_id);
+            netdev_dbg(dev, "5G GTP update QER_ID(%u)", qer_id);
         }
 
         return err;
     }
 
-    if (info->nlhdr->nlmsg_flags & NLM_F_REPLACE)
+    if (info->nlhdr->nlmsg_flags & NLM_F_REPLACE) {
+		netdev_dbg(dev, "Invalid flage set NLM_F_REPLACE");
         return -ENOENT;
+	}
 
-    if (info->nlhdr->nlmsg_flags & NLM_F_APPEND)
+    if (info->nlhdr->nlmsg_flags & NLM_F_APPEND) {
+		netdev_dbg(dev, "Invalid flage set NLM_F_APPEND");
         return -EOPNOTSUPP;
+	}
 
     qer = kzalloc(sizeof(*qer), GFP_ATOMIC);
     if (!qer) {
-		netdev_dbg(dev, "Failed to allocate memory for QER_ID(%#x)", qer_id);
+		netdev_dbg(dev, "Failed to allocate memory for QER_ID(%u)", qer_id);
         return -ENOMEM;
     }
 
@@ -2772,12 +2787,12 @@ static int gtp5g_add_qer(struct gtp5g_dev *gtp, struct genl_info *info)
     err = qer_fill(qer, gtp, info);
     if (err < 0) {
         //netdev_dbg(dev, "5G GTP add QER_ID(%#x) fail", qer_id);
-        printk("%s: Failed to add QER_ID(%#x)", __func__, qer_id);
+        printk("%s: Failed to add QER_ID(%u)", __func__, qer_id);
         qer_context_delete(qer);
     } else {
         hlist_add_head_rcu(&qer->hlist_id, 
 							&gtp->qer_id_hash[u32_hashfn(qer_id) % gtp->hash_size]);
-        printk("%s: Successfully added QER_ID(%#x)", __func__, qer_id);
+        //printk("%s: Successfully added QER_ID(%u)", __func__, qer_id);
     }
 
     return err;
@@ -2817,8 +2832,31 @@ UNLOCK:
 
 static int gtp5g_genl_del_qer(struct sk_buff *skb, struct genl_info *info)
 {
-	printk("%s TODO\n", __func__);
-	return 0;
+    u32 id;
+    struct gtp5g_qer *qer;
+    int err = 0;
+
+    if (!info->attrs[GTP5G_QER_ID] ||
+        !info->attrs[GTP5G_LINK])
+        return -EINVAL;
+
+    id = nla_get_u32(info->attrs[GTP5G_QER_ID]);
+
+    rcu_read_lock();
+
+    qer = gtp5g_find_qer(sock_net(skb->sk), info->attrs);
+    if (IS_ERR(qer)) {
+        err = PTR_ERR(qer);
+        goto UNLOCK;
+    }
+
+    netdev_dbg(qer->dev, "5G GTP-U : delete QER id[%u]\n", id);
+    qer_context_delete(qer);
+
+UNLOCK:
+    rcu_read_unlock();
+
+    return err;
 }
 
 static int gtp5g_genl_fill_qer(struct sk_buff *skb, u32 snd_portid, u32 snd_seq,
