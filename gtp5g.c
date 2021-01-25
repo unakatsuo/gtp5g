@@ -581,7 +581,9 @@ static int pdr_fill(struct gtp5g_pdr *pdr, struct gtp5g_dev *gtp, struct genl_in
         hlist_add_head_rcu(&pdr->hlist_related_far, &gtp->related_far_hash[u32_hashfn(*pdr->far_id) % gtp->hash_size]);
 
         pdr->far = far_find_by_id(gtp, *pdr->far_id);
-    }
+    } else {
+		printk("%s:%d FAR ID not exist\n", __func__, __LINE__);
+	}
 
 	/* QER */
     if (info->attrs[GTP5G_PDR_QER_ID]) {
@@ -607,7 +609,7 @@ static int pdr_fill(struct gtp5g_pdr *pdr, struct gtp5g_dev *gtp, struct genl_in
 			printk("%s:%d Failed to find QER id(%#x)\n", __func__, __LINE__,
 					*pdr->qer_id);
     } else {
-		printk("%s:%d QER ID not exist)\n", __func__, __LINE__);
+		printk("%s:%d QER ID not exist\n", __func__, __LINE__);
 	}
 
 
@@ -1046,10 +1048,12 @@ static int gtp5g_fwd_skb_ipv4(struct sk_buff *skb,
 	if (IS_ERR(rt))
         goto err;
 
-	if (!pdr->qer)
+	if (!pdr->qer) {
+		printk("%s:%d QER is not in PDR\n", __func__, __LINE__);
 		gtp5g_set_pktinfo_ipv4(pktinfo, pdr->sk, iph, hdr_creation, NULL, rt, &fl4, dev);
-	else
+	} else {
 		gtp5g_set_pktinfo_ipv4(pktinfo, pdr->sk, iph, hdr_creation, pdr->qer, rt, &fl4, dev);
+	}
 
     gtp5g_push_header(skb, pktinfo);
 
@@ -1102,8 +1106,7 @@ static int gtp5g_handle_skb_ipv4(struct sk_buff *skb, struct net_device *dev,
 		printk("%s:%d QER Rule found, id(%#x) qfi(%#x)\n", 
 				__func__, __LINE__, qer->id, qer->qfi);
 	} else {
-		printk("%s:%d No QER Rule found\n", 
-				__func__, __LINE__);
+		printk("%s:%d No QER Rule found\n", __func__, __LINE__);
 	}
 	
     far = pdr->far;
@@ -1211,6 +1214,9 @@ static void pdr_context_free(struct rcu_head *head)
         kfree(pdi->f_teid);
         kfree(pdr->pdi);
         kfree(pdr->far_id);
+		
+		if (pdr->qer_id)
+			kfree(pdr->qer_id);
 
         sdf = pdi->sdf;
         if (pdi->sdf) {
@@ -1294,7 +1300,6 @@ static void far_context_delete(struct gtp5g_far *far)
     call_rcu(&far->rcu_head, far_context_free);
 }
 
-
 static int gtp5g_hashtable_new(struct gtp5g_dev *gtp, int hsize)
 {
     int i;
@@ -1376,7 +1381,7 @@ static void gtp5g_hashtable_free(struct gtp5g_dev *gtp)
             pdr_context_delete(pdr);
         hlist_for_each_entry_rcu(far, &gtp->far_id_hash[i], hlist_id)
             far_context_delete(far);
-        hlist_for_each_entry_rcu(far, &gtp->qer_id_hash[i], hlist_id)
+        hlist_for_each_entry_rcu(qer, &gtp->qer_id_hash[i], hlist_id)
             qer_context_delete(qer);
     }
 
@@ -1668,7 +1673,7 @@ static int gtp5g_rx(struct gtp5g_pdr *pdr, struct sk_buff *skb,
     struct gtp5g_qer *qer = pdr->qer;
 
     if (!far) {
-        pr_err("There is no FAR related to PDR[%u]", pdr->id);
+        pr_err("There is no FAR related to PDR(%u)", pdr->id);
         return -1;
     }
 
@@ -1676,7 +1681,7 @@ static int gtp5g_rx(struct gtp5g_pdr *pdr, struct sk_buff *skb,
 		printk("%s:%d QER Rule found, id(%#x) qfi(%#x)\n", __func__, __LINE__,
 			qer->id, qer->qfi);
 	} else {
-		printk("There is no QER found\n");
+		printk("%s:%d There is no QER found\n", __func__, __LINE__);
 	}
 
     // TODO: not reading the value of outer_header_removal now,
@@ -2392,7 +2397,6 @@ OUT:
 
 static int gtp5g_add_far(struct gtp5g_dev *gtp, struct genl_info *info)
 {
-
     struct net_device *dev = gtp->dev;
     struct gtp5g_far *far;
     int err = 0;
@@ -2411,8 +2415,7 @@ static int gtp5g_add_far(struct gtp5g_dev *gtp, struct genl_info *info)
         if (err < 0) {
             far_context_delete(far);
             pr_warn("5G GTP update FAR id[%d] fail: %d\n", far_id, err);
-        }
-        else {
+        } else {
             netdev_dbg(dev, "5G GTP update FAR id[%d]", far_id);
         }
         return err;
@@ -2436,12 +2439,10 @@ static int gtp5g_add_far(struct gtp5g_dev *gtp, struct genl_info *info)
     far->dev = gtp->dev;
 
     err = far_fill(far, gtp, info);
-
     if (err < 0) {
         netdev_dbg(dev, "5G GTP add FAR id[%d] fail", far_id);
         far_context_delete(far);
-    }
-    else {
+    } else {
         hlist_add_head_rcu(&far->hlist_id, &gtp->far_id_hash[u32_hashfn(far_id) % gtp->hash_size]);
         netdev_dbg(dev, "5G GTP add FAR id[%d]", far_id);
     }
@@ -2565,8 +2566,7 @@ static int gtp5g_genl_fill_far(struct sk_buff *skb, u32 snd_portid, u32 snd_seq,
     }
 
     if (cnt) {
-        if (nla_put(skb, GTP5G_FAR_RELATED_TO_PDR,
-            cnt * sizeof(u16) / sizeof(char), u16_buf))
+        if (nla_put(skb, GTP5G_FAR_RELATED_TO_PDR, cnt * sizeof(u16) / sizeof(char), u16_buf))
             goto GENLMSG_FAIL;
     }
 
@@ -2852,7 +2852,7 @@ static int gtp5g_add_qer(struct gtp5g_dev *gtp, struct genl_info *info)
     } else {
         hlist_add_head_rcu(&qer->hlist_id, 
 							&gtp->qer_id_hash[u32_hashfn(qer_id) % gtp->hash_size]);
-        //printk("%s: Successfully added QER_ID(%u)", __func__, qer_id);
+        printk("%s: Successfully added QER_ID(%u)", __func__, qer_id);
     }
 
     return err;
@@ -2903,19 +2903,20 @@ static int gtp5g_genl_del_qer(struct sk_buff *skb, struct genl_info *info)
     id = nla_get_u32(info->attrs[GTP5G_QER_ID]);
 
     rcu_read_lock();
-
     qer = gtp5g_find_qer(sock_net(skb->sk), info->attrs);
     if (IS_ERR(qer)) {
         err = PTR_ERR(qer);
-        goto UNLOCK;
+        goto unlock;
     }
 
     netdev_dbg(qer->dev, "5G GTP-U : delete QER id[%u]\n", id);
+    printk("%s: 5G GTP-U : delete QER id[%u]\n", __func__, id);
     qer_context_delete(qer);
 
-UNLOCK:
+unlock:
     rcu_read_unlock();
 
+    printk("%s: Failed to find qer(%u)\n", __func__, id);
     return err;
 }
 
@@ -3054,13 +3055,13 @@ static int gtp5g_genl_get_qer(struct sk_buff *skb, struct genl_info *info)
     if (IS_ERR(qer)) {
 		printk("%s:%d Failed to find QER\n", __func__, __LINE__);
         err = PTR_ERR(qer);
-        goto UNLOCK;
+        goto unlock;
     }
 
     skb_ack = genlmsg_new(NLMSG_GOODSIZE, GFP_ATOMIC);
     if (!skb_ack) {
         err = -ENOMEM;
-        goto UNLOCK;
+        goto unlock;
     }
 
     err = gtp5g_genl_fill_qer(skb_ack, 
@@ -3070,18 +3071,16 @@ static int gtp5g_genl_get_qer(struct sk_buff *skb, struct genl_info *info)
 								qer);
     if (err < 0) {
 		printk("%s:%d Failed to fil the qer\n", __func__, __LINE__);
-        goto FREEBUF;
+        goto freebuf;
 	}
 
     rcu_read_unlock();
-
     return genlmsg_unicast(genl_info_net(info), skb_ack, info->snd_portid);
 
-FREEBUF:
+freebuf:
     kfree_skb(skb_ack);
-UNLOCK:
+unlock:
     rcu_read_unlock();
-
     return err;
 }
 
@@ -3125,8 +3124,7 @@ static int gtp5g_genl_dump_qer(struct sk_buff *skb, struct netlink_callback *cb)
                     cb->args[0] = (unsigned long) gtp;
                     cb->args[1] = i;
                     cb->args[2] = qer->id;
-
-                    goto OUT;
+                    goto out;
                 }
             }
         }
@@ -3134,10 +3132,8 @@ static int gtp5g_genl_dump_qer(struct sk_buff *skb, struct netlink_callback *cb)
 
     cb->args[5] = 1;
 
-OUT:
+out:
     return skb->len;
-
-	return 0;
 }
 
 static const struct nla_policy gtp5g_genl_pdr_policy[GTP5G_PDR_ATTR_MAX + 1] = {
