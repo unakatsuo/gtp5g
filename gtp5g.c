@@ -868,6 +868,7 @@ struct gtp5g_pktinfo {
     struct flowi4                 fl4;
     struct rtable                 *rt;
     struct outer_header_creation  *hdr_creation;
+	struct gtp5g_qer			  *qer; 
     struct net_device             *dev;
     __be16                        gtph_port;
 };
@@ -876,10 +877,10 @@ static void gtp5g_push_header(struct sk_buff *skb, struct gtp5g_pktinfo *pktinfo
 {
     int payload_len = skb->len;
     struct gtpv1_hdr *gtp1;
+	gtpv1_hdr_opt_t	*gtp1opt;
+	ext_pdu_sess_ctr_t *dl_pdu_sess;
 
     pktinfo->gtph_port = pktinfo->hdr_creation->port;
-
-    gtp1 = skb_push(skb, sizeof(*gtp1));
 
     /* Bits 8  7  6  5  4  3  2	 1
      *	  +--+--+--+--+--+--+--+--+
@@ -887,19 +888,38 @@ static void gtp5g_push_header(struct sk_buff *skb, struct gtp5g_pktinfo *pktinfo
      *	  +--+--+--+--+--+--+--+--+
      *	    0  0  1  1	0  0  0  0
      */
-    gtp1->flags	= 0x30; /* v1, GTP-non-prime. */
+    gtp1 = skb_push(skb, sizeof(*gtp1));
+	gtp1->flags	= 0x30; /* v1, GTP-non-prime. */
     gtp1->type	= GTP_TPDU;
-    gtp1->length = htons(payload_len);
     gtp1->tid = pktinfo->hdr_creation->teid;
+	gtp1->length = htons(payload_len); /* Excluded the length of gtpv1 */
 
-    /* TODO: Suppport for extension header, sequence number and N-PDU.
-     *	 Update the length field if any of them is available.
+    /* Suppport for extension header, sequence number and N-PDU.
+     * Update the length field if any of them is available.
      */
+	if (pktinfo->qer) {
+		gtp1->flags	|= GTPV1_HDR_FLG_EXTHDR; /* v1, Extension header enabled */ 
+		gtp1->length += htons(8); /* E-S-N(4Bytes) + DL_PDU_Sess_Info(4Bytes) */
+		
+		/* Push optional header information */
+		gtp1opt = skb_push(skb, sizeof(*gtp1opt));
+		gtp1opt->seq_number = 0;
+    	gtp1opt->NPDU = 0;
+    	gtp1opt->next_ehdr_type = 0x85; /* PDU Session Container */
+
+		/* Push PDU Session container information */
+		dl_pdu_sess = skb_push(skb, sizeof(*dl_pdu_sess));
+		dl_pdu_sess->length = 1; /* Multiple of 4 */
+		dl_pdu_sess->pdu_sess_ctr.type_spare = 0; /* For DL */
+		dl_pdu_sess->pdu_sess_ctr.u.dl.ppp_rqi_qfi = pktinfo->qer->qfi; 
+		dl_pdu_sess->next_ehdr_type = 0; /* No more extension Header */
+	}
 }
 
 static inline void gtp5g_set_pktinfo_ipv4(struct gtp5g_pktinfo *pktinfo,
                                         struct sock *sk, struct iphdr *iph,
                                         struct outer_header_creation *hdr_creation,
+										struct gtp5g_qer *qer,
                                         struct rtable *rt,
                                         struct flowi4 *fl4,
                                         struct net_device *dev)
@@ -907,6 +927,7 @@ static inline void gtp5g_set_pktinfo_ipv4(struct gtp5g_pktinfo *pktinfo,
 	pktinfo->sk            = sk;
 	pktinfo->iph           = iph;
 	pktinfo->hdr_creation  = hdr_creation;
+	pktinfo->qer  		   = qer;
 	pktinfo->rt            = rt;
 	pktinfo->fl4           = *fl4;
 	pktinfo->dev           = dev;
@@ -998,12 +1019,13 @@ static int gtp5g_drop_skb_ipv4(struct sk_buff *skb, struct net_device *dev)
 {
     dev->stats.tx_dropped++;
     dev_kfree_skb(skb);
-
     return 0;
 }
 
-static int gtp5g_fwd_skb_ipv4(struct sk_buff *skb, struct net_device *dev,
-                                struct gtp5g_pktinfo *pktinfo, struct gtp5g_pdr *pdr)
+static int gtp5g_fwd_skb_ipv4(struct sk_buff *skb, 
+		struct net_device *dev,
+		struct gtp5g_pktinfo *pktinfo, 
+		struct gtp5g_pdr *pdr)
 {
     struct rtable *rt;
     struct flowi4 fl4;
@@ -1018,11 +1040,17 @@ static int gtp5g_fwd_skb_ipv4(struct sk_buff *skb, struct net_device *dev,
 
     hdr_creation = pdr->far->fwd_param->hdr_creation;
     rt = ip4_find_route(skb, iph, pdr->sk, dev, 
-                        pdr->role_addr_ipv4.s_addr, hdr_creation->peer_addr_ipv4.s_addr, &fl4);
-    if (IS_ERR(rt))
+                        pdr->role_addr_ipv4.s_addr, 
+						hdr_creation->peer_addr_ipv4.s_addr, 
+						&fl4);
+	if (IS_ERR(rt))
         goto err;
 
-    gtp5g_set_pktinfo_ipv4(pktinfo, pdr->sk, iph, hdr_creation, rt, &fl4, dev);
+	if (!pdr->qer)
+		gtp5g_set_pktinfo_ipv4(pktinfo, pdr->sk, iph, hdr_creation, NULL, rt, &fl4, dev);
+	else
+		gtp5g_set_pktinfo_ipv4(pktinfo, pdr->sk, iph, hdr_creation, pdr->qer, rt, &fl4, dev);
+
     gtp5g_push_header(skb, pktinfo);
 
     return FAR_ACTION_FORW;
@@ -1382,10 +1410,9 @@ static void gtp5g_link_setup(struct net_device *dev)
     dev->features |= NETIF_F_LLTX;
     netif_keep_dst(dev);
 
-    /** TODO: Modify the headroom size based on
+    /* TODO: Modify the headroom size based on
 	 * what are the extension header going to supports.
-	 * 
-	 */
+	 * */
     dev->needed_headroom = LL_MAX_HEADER +
     			sizeof(struct iphdr) +
                   	sizeof(struct udphdr) +
@@ -1799,7 +1826,7 @@ static int gtp1u_udp_encap_recv(struct gtp5g_dev *gtp, struct sk_buff *skb)
     if (!pskb_may_pull(skb, hdrlen))
         return -1;
 
-	netdev_dbg(gtp->dev, "Total header len(%#x)\n", hdrlen);
+	//netdev_dbg(gtp->dev, "Total header len(%#x)\n", hdrlen);
     //gtp1 = (struct gtpv1_hdr *)(skb->data + sizeof(struct udphdr));
     pdr = pdr_find_by_gtp1u(gtp, skb, hdrlen, gtpv1->tid);
     if (!pdr) {
@@ -1828,6 +1855,7 @@ static int gtp5g_encap_recv(struct sock *sk, struct sk_buff *skb)
     switch (udp_sk(sk)->encap_type) {
     case UDP_ENCAP_GTP1U:
         //netdev_dbg(gtp->dev, "Receive GTP-U v1 packet\n");
+		printk("%s:%d Received a packet\n", __func__, __LINE__);
         ret = gtp1u_udp_encap_recv(gtp, skb);
         break;
     default:
