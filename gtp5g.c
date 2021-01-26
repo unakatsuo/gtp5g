@@ -2791,7 +2791,7 @@ static struct gtp5g_qer *qer_find_by_id(struct gtp5g_dev *gtp, u32 id)
     return NULL;
 }
 
-static int gtp5g_add_qer(struct gtp5g_dev *gtp, struct genl_info *info)
+static int gtp5g_gnl_add_qer(struct gtp5g_dev *gtp, struct genl_info *info)
 {
 
     struct net_device *dev = gtp->dev;
@@ -2881,7 +2881,7 @@ static int gtp5g_genl_add_qer(struct sk_buff *skb, struct genl_info *info)
         goto UNLOCK;
     }
 
-    err = gtp5g_add_qer(gtp, info);
+    err = gtp5g_gnl_add_qer(gtp, info);
 
 UNLOCK:
     rcu_read_unlock();
