@@ -151,6 +151,7 @@ typedef struct gtp1_hdr_ext_nr_ran_ctr {
  *			- variable length field
  *			- Specified in TS 38.415 (Refer. v15.2.0 (2018-12)) in Section 5.5
  *				-> DL PDU Session Information (PDU Type 0)
+ *					<- TODO: if ppp is set to 1 then ppi SHOULD set
  *				-> UL PDU Session Information (PDU Type 1)
  *
  * Note: For a G-PDU with serveral Extension Headers, the PDU Session
