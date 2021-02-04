@@ -1742,10 +1742,6 @@ static int gtp5g_newlink(struct net *src_net, struct net_device *dev,
 
     gtp = netdev_priv(dev);
 
-    err = gtp5g_encap_enable(gtp, data);
-    if (err < 0)
-        return err;
-
     if (!data[IFLA_GTP5G_PDR_HASHSIZE])
         hashsize = 1024;
     else
@@ -1764,14 +1760,23 @@ static int gtp5g_newlink(struct net *src_net, struct net_device *dev,
     gn = net_generic(dev_net(dev), gtp5g_net_id);
     list_add_rcu(&gtp->list, &gn->gtp5g_dev_list);
 
+    err = gtp5g_encap_enable(gtp, data);
+    if (err < 0) {
+        netdev_dbg(dev, "failed to enable UDP encap %d\n", err);
+        goto out_encap;
+    }
+    
     netdev_dbg(dev, "registered new 5G GTP interface\n");
 
     return 0;
 
-out_hashtable:
-    gtp5g_hashtable_free(gtp);
 out_encap:
     gtp5g_encap_disable(gtp);
+out_dev:
+    list_del_rcu(&gtp->list);
+    unregister_netdevice(dev);
+out_hashtable:
+    gtp5g_hashtable_free(gtp);
     return err;
 
 }
